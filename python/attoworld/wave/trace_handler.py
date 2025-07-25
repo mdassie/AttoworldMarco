@@ -247,6 +247,10 @@ class TraceHandler:
         """
         check_equal_length(wvl_FFT_trace, spectrum_FFT_trace, phase_FFT_trace)
 
+        if np.any(spectrum_FFT_trace<0):
+            print('\n\nWARNING: in function TraceHandler.load_from_spectral_data() spectrum_FFT_trace contains negative values; set them to zero in the constructor\n\n')
+            spectrum_FFT_trace = np.maximum(spectrum_FFT_trace, 0)
+            
         # check that the wvl_FFT_trace array is monotonically increasing
         if np.any(np.diff(wvl_FFT_trace) < 0):
             if np.all(np.diff(wvl_FFT_trace) < 0):
@@ -333,7 +337,7 @@ class TraceHandler:
         self.fftSpectrum = np.abs(self.fftFieldV[self.frequencyAxis > 0])**2 * constants.speed_of_light/self.wvlAxis**2
         self.compute_complex_field()
         self.update_spectral_phase()
-        self.normalize_fft_spectrum()
+        #self.normalize_fft_spectrum()
 
     def update_spectral_phase(self):
         """computes the spectral phase of the trace. The result is stored in self.fftphase.
@@ -423,7 +427,7 @@ class TraceHandler:
             lowEdge, upEdge: lower and upper edge of the window upEdge-lowEdge = FWHM of the window
             lowEdgeWidth, upEdgeWidth: width of the cosine-shaped edges (from 0 to 1 or viceversa)
         """
-        window = asymmetric_tukey_window(np.abs(self.fieldTimeV), lowEdge, upEdge, lowEdgeWidth, upEdgeWidth)
+        window = asymmetric_tukey_window(self.fieldTimeV, lowEdge, upEdge, lowEdgeWidth, upEdgeWidth)
         self.fieldV = self.fieldV * window
         self.update_fft()
 
@@ -491,20 +495,28 @@ class TraceHandler:
             self.fieldV = np.cumsum(self.fieldV) * np.mean(np.diff(self.fieldTimeV))
             self.update_fft()
 
-    def save_trace_to_file(self, filename, low_lim=None, up_lim=None):
+    def save_trace_to_file(self, filename, low_lim=None, up_lim=None, stdev: bool = True):
         """Saves the trace to file
 
         Args:
             filename
             low_lim, up_lim: only save the trace between low_lim and up_lim (default: None, None)
+            stdev (bool): if True (default) and if self.fieldStdevV is not None, the standard deviation (or sigma) will be saved to the file as well.
         """
         if low_lim is not None and up_lim is not None:
             fieldTimeV_to_write = self.fieldTimeV[(self.fieldTimeV >= low_lim) & (self.fieldTimeV <= up_lim)]
             fieldV_to_write = self.fieldV[(self.fieldTimeV >= low_lim) & (self.fieldTimeV <= up_lim)]
+            if stdev and self.fieldStdevV is not None:
+                fieldStdevV_to_write = self.fieldStdevV[(self.fieldTimeV >= low_lim) & (self.fieldTimeV <= up_lim)]
         else:
             fieldTimeV_to_write = self.fieldTimeV
             fieldV_to_write = self.fieldV
-        data = pandas.DataFrame({'delay (fs)': fieldTimeV_to_write, 'field (a.u.)': fieldV_to_write})
+            if stdev and self.fieldStdevV is not None:
+                fieldStdevV_to_write = self.fieldStdevV
+        if stdev and self.fieldStdevV is not None:
+            data = pandas.DataFrame({'delay (fs)': fieldTimeV_to_write, 'field (a.u.)': fieldV_to_write, 'stdev field': fieldStdevV_to_write})
+        else:
+            data = pandas.DataFrame({'delay (fs)': fieldTimeV_to_write, 'field (a.u.)': fieldV_to_write})
         data.to_csv(filename, sep='\t', index=False)
 
     def normalize_spectrum(self):
@@ -573,12 +585,13 @@ class TraceHandler:
         F = constants.speed_of_light*constants.epsilon_0 * np.trapz(self.fieldV**2, self.fieldTimeV)* 1e1
         return F
 
-    def set_fluence(self, fluence):
+    def set_fluence(self, fluence:float):
         """Set the fluence of the trace.
 
         Convention: field [V/Å], time [fs], fluence [J/cm²]
 
         F = c\*eps_0\*integral(E^2)dt"""
+
         F = constants.speed_of_light*constants.epsilon_0 * np.trapz(self.fieldV**2, self.fieldTimeV)* 1e1
         self.fieldV *= np.sqrt(fluence/F)
         self.update_fft()
@@ -675,6 +688,49 @@ class TraceHandler:
         self.update_fft_spectrum()
         self.strip_from_trace()
 
+    def deconvolute_by_response_function(self, freq, abs_rf, phase_rf):
+        """Correct for the spectral response function of the measurement setup.
+
+        If your response function is limited to a certain spectral range, please apply a bandpass afterwards.
+
+        Args:
+            freq (ndarray): frequency ν(PHz)
+            abs_rf (ndarray): modulus of the response function (|Signal(ν)/E(ν)|)
+            phase_rf (ndarray): phase of the response function (arg(Signal(ν)/E(ν)))
+        """
+        if np.any(np.diff(freq)) < 0:
+            if np.all(np.diff(freq)) < 0:
+                freq = freq[::-1]
+                abs_rf = abs_rf[::-1]
+                phase_rf = phase_rf[::-1]
+            else:
+                raise ValueError('in function TraceHandler.apply_transmission() wavelength array is not monotonous')
+
+        # extend response function using the last point (NOT FOR REAL USE, PLEASE APPLY BANDPASS AFTERWARDS)
+        # and add negative frequencies
+        final_val_freq = np.array([np.max(self.frequencyAxis)*2])
+        final_val = np.array([abs_rf[-1]])
+        m, b = np.polyfit(freq, phase_rf, 1)
+        final_phase = m*final_val_freq + b
+        freq = np.concatenate((-final_val_freq[::-1], -freq[::-1], freq, final_val_freq))
+        abs_rf = np.concatenate((final_val[::-1], abs_rf[::-1], abs_rf, final_val))
+        phase_rf = np.concatenate((final_phase[::-1], phase_rf[::-1], phase_rf, final_phase))
+
+        # interpolate the spectrum to the frequency axis of the fft
+        abs_interp = np.interp(self.frequencyAxis, freq, abs_rf)
+        phase_interp = np.interp(self.frequencyAxis, freq, phase_rf)
+
+        # BUG: Somehow the spectrum changes after fluence correction
+        #fl_orig = self.get_fluence()
+
+        self.fftFieldV = self.fftFieldV / (abs_interp*np.exp(1.j*phase_interp))
+        self.update_trace_from_fft()
+        self.update_fft_spectrum()
+        self.strip_from_trace()
+
+        #self.set_fluence(fl_orig)
+
+
     def apply_transmission(self, wavelengths, f):
         """Applies a spectral transmission function to the trace (e.g. spectral filter).
 
@@ -682,8 +738,8 @@ class TraceHandler:
             wavelengths: ndarray = wavelength array (nm)
             f: ndarray = transmission function f(λ)
         """
-        if np.any(np.diff(wavelengths)) < 0:
-            if np.all(np.diff(wavelengths)) < 0:
+        if np.any(np.diff(wavelengths) < 0):
+            if np.all(np.diff(wavelengths) < 0):
                 wavelengths = wavelengths[::-1]
                 f = f[::-1]
             else:
@@ -929,7 +985,8 @@ class TraceHandler:
         Args:
             low_lim, up_lim (float): xaxis limits for plotting. Default: 40, 1000
             no_phase: if True, don't plot the phase. Default: False
-        """
+            phase_blanking_level: float = the minimum intensity level to plot the phase (default 0.05).
+                    """
         fig, ax = plt.subplots()
 
         if not no_phase:
@@ -990,6 +1047,7 @@ class MultiTraceHandler:
 
         self.fsZeroPadding = 150
         self.traceHandlers = []
+        self.zeroDelay = None
         if filenameList is not None:
             for i in range(len(filenameList)):
                 if filenameSpectrumList is not None:
@@ -1046,6 +1104,54 @@ class MultiTraceHandler:
         else:
             raise ValueError('in function MultiTraceHandler.append_trace() filename and filename_spectrum cannot be None\n'
                              'it might be that the function was erroneously used with no arguments\n')
+        self.zeroDelay = None
+
+    def fourier_interpolation(self, ntimes_finer: float):
+        """Performs fourier interpolation of the traces in the list by a factor 'factor'.
+
+        Args:
+            ntimes_finer (float) :factor of interpolation
+        """
+        if ntimes_finer <= 1:
+            raise ValueError('in function MultiTraceHandler.fourier_interpolation() factor should be > 1\n')
+        for i in range(len(self.traceHandlers)):
+            self.traceHandlers[i].fourier_interpolation(ntimes_finer)
+
+    def average_traces(self, indexList=None):
+        """Averages the traces in the list. If indexList is provided, only the traces with the corresponding indices are averaged.
+
+        Args:
+            indexList: list of indices of the traces to average. If None (default), all traces are averaged.
+        Returns:
+            TraceHandler: a new TraceHandler object containing the averaged trace
+        """
+        if indexList is None:
+            indexList = range(len(self.traceHandlers))
+        else:
+            check_equal_length(indexList, self.traceHandlers)
+        if len(indexList) == 0:
+            raise ValueError('in function MultiTraceHandler.average_traces() indexList is empty\n')
+        tlist, fieldlist = [], []
+        mindt, mint, maxt = np.inf, -np.inf, +np.inf
+        for i in indexList:
+            t, field = self.traceHandlers[i].get_trace()
+            if self.zeroDelay is not None:
+                t = t - self.zeroDelay[i]
+            tlist.append(t)
+            fieldlist.append(field)
+            if np.min(t) > mint:
+                mint = np.min(t)
+            if np.max(t) < maxt:
+                maxt = np.max(t)
+            if np.min(np.diff(t)) < mindt:
+                mindt = np.min(np.diff(t))
+        avge_t = np.linspace(mint, maxt, int(np.ceil((maxt-mint)/mindt)))
+        avge_field = np.zeros(len(avge_t))
+        for i in indexList:
+            if self.zeroDelay is not None:
+                avge_field += np.interp(avge_t, tlist[i], fieldlist[i])
+        avge_field /= len(indexList)
+        return TraceHandler(time=avge_t, field=avge_field, stdev=None, wvl=None, spectrum=None)
 
     def flip_trace(self, index: int):
         """flips the trace number 'index'
@@ -1059,17 +1165,41 @@ class MultiTraceHandler:
         self.traceHandlers[index].fftFieldV = -self.traceHandlers[index].fftFieldV
         self.traceHandlers[index].complexFieldV= -self.traceHandlers[index].complexFieldV
 
+    def set_zero_delay(self, zeroDelay):
+        """Sets the zero delay for all traces. The zero
+        delay is the time value corresponding to the envelope peak of the trace.
+        This is used to align the traces in time.
+
+        Args:
+            zeroDelay: float or list of floats (one per trace)
+        """
+        if isinstance(zeroDelay, (int, float)):
+            self.zeroDelay = [zeroDelay]*len(self.traceHandlers)
+        elif isinstance(zeroDelay, list):
+            check_equal_length(zeroDelay, self.traceHandlers)
+            self.zeroDelay = zeroDelay
+        else:
+            raise ValueError('in function MultiTraceHandler.set_zero_delay() zeroDelay should be a float or a list of floats\n')
+
     def tukey_bandpass(self, lowWavelengthEdge, upWavelengthEdge, lowEdgeWidth, highEdgeWidth):
         """applies a bandpass filter the traces in the frequency domain using a tukey window. See traceHandler's docs"""
         for i in range(len(self.traceHandlers)):
             self.traceHandlers[i].fft_tukey_bandpass(lowWavelengthEdge, upWavelengthEdge, lowEdgeWidth, highEdgeWidth)
+
+    def tukey_time_window(self, low_edge, up_edge, low_edge_width, high_edge_width):
+        """applies a tukey time window to the traces in the time domain. See traceHandler's docs"""
+        for i in range(len(self.traceHandlers)):
+            if self.zeroDelay is None:
+                self.traceHandlers[i].tukey_time_window(low_edge, up_edge, low_edge_width, high_edge_width)
+            else:
+                self.traceHandlers[i].tukey_time_window(low_edge + self.zeroDelay[i], up_edge + self.zeroDelay[i], low_edge_width, high_edge_width)
 
     def apply_spectrum(self, wvl = None , spectrum = None, CEP_shift = 0., stripZeroPadding = True):
         """applies spectrum to the phase of the pulse. See traceHandler's docs"""
         for i in range(len(self.traceHandlers)):
             self.traceHandlers[i].apply_spectrum(wvl, spectrum, CEP_shift, stripZeroPadding)
 
-    def plot_traces(self, low_lim=None, up_lim=None, labels=None, delay_shift=None, offset: float=2., errorbar: bool=False, normalize: bool=True):
+    def plot_traces(self, low_lim=None, up_lim=None, labels=None, delay_shift=None, offset: float=2., errorbar: bool=False, normalize: bool=True, posxtext: list=None, trueLegend: bool=True):
         """plots all traces.
 
         Args:
@@ -1082,8 +1212,10 @@ class MultiTraceHandler:
             normalize (bool): Default True
         """
         fig, ax = plt.subplots()
-        if delay_shift is None:
+        if delay_shift is None and self.zeroDelay is None:
             delay_shift = [0.]*len(self.traceHandlers)
+        elif self.zeroDelay is not None:
+            delay_shift = self.zeroDelay
         check_equal_length(delay_shift, self.traceHandlers)
 
         for i in range(len(self.traceHandlers)):
@@ -1100,10 +1232,16 @@ class MultiTraceHandler:
                 ax.plot(t-delay_shift[i], offset*i + field/norm_plot, label='Trace '+str(i), color=last_fill.get_facecolor(), alpha=1.0)
             else:
                 ax.plot(t-delay_shift[i], offset*i + field/norm_plot, label='Trace '+str(i))
+            if labels is not None and not trueLegend:
+                if posxtext is None:
+                    posxtexti = np.min(t-delay_shift[i])
+                else:
+                    posxtexti = posxtext[i]
+                ax.text(posxtexti, offset*(i+0.5), labels[i], verticalalignment='center', fontsize =  matplotlib.rcParams['legend.fontsize'])
         ax.set_xlabel('Time (fs)')
         ax.set_ylabel('Field (Arb. unit)')
 
-        if labels is not None:
+        if labels is not None and trueLegend:
             handles, labels_dump = ax.get_legend_handles_labels()
             plt.legend(handles[::-1], labels[::-1], loc='upper left')
         else:
@@ -1112,7 +1250,7 @@ class MultiTraceHandler:
             ax.set_xlim(low_lim, up_lim)
         return fig
 
-    def plot_spectra(self, low_lim=50, up_lim=1000, labels=None, offset=0.015, logscale: bool=False):
+    def plot_spectra(self, low_lim=50, up_lim=1000, labels=None, offset=0.015, logscale: bool=False, normalize: bool=True):
         """Plot all spectra.
 
         Args:
@@ -1124,12 +1262,16 @@ class MultiTraceHandler:
         """
         fig, ax = plt.subplots()
         for i in range(len(self.traceHandlers)):
-            self.traceHandlers[i].normalize_fft_spectrum()
+            if normalize:
+                self.traceHandlers[i].normalize_fft_spectrum()
+            else:
+                self.traceHandlers[i].update_fft()
             wvl, spctr = self.traceHandlers[i].get_spectrum_trace()
             if logscale:
                 ax.plot(wvl, (offset**i)*spctr)
                 ylow = np.mean(spctr[(wvl<up_lim)&(wvl>low_lim)])/(offset**3)
                 yup = np.mean(spctr[(wvl<up_lim)&(wvl>low_lim)])*(offset**(len(self.traceHandlers)))
+                ax.set_yscale('log')
                 ax.set_ylim(ylow, yup)
             else:
                 ax.plot(wvl, i*offset + spctr)

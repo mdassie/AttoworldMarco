@@ -282,6 +282,21 @@ class SpectrumHandler:
         self.wvl = intercept + slope * self.wvl
         self.check_wvl_ascending()
 
+    def clip(self, low_lim: float = None, up_lim: float = None):
+        """Clips the spectrum to the given wavelength limits.
+
+        Args:
+            low_lim, up_lim (float): Wavelength limits for clipping. If None, no clipping is applied.
+        """
+        if low_lim is None:
+            low_lim = np.min(self.wvl)-1
+        if up_lim is  None:
+            up_lim = np.max(self.wvl)+1
+
+        indices = (self.wvl >= low_lim) & (self.wvl <= up_lim)
+        self.wvl = self.wvl[indices]
+        self.spectrum = self.spectrum[indices]
+
     def tukey_filter(self, edge1: float, edge2: float, edge1_width: float, edge2_width: float):
         """Applies a Tukey window to the spectrum (e.g. to remove noise at the edges).
 
@@ -327,8 +342,10 @@ class SpectrumHandler:
             spectrum_divisor = gaussian_filter1d(spectrum_divisor, sigma=nm_smearing/(wvl_divisor[1]-wvl_divisor[0]))
             self.spectrum = gaussian_filter1d(self.spectrum, sigma=nm_smearing/(self.wvl[1]-self.wvl[0]))
         commonWvl = self.wvl[(self.wvl>np.min(wvl_divisor))&(self.wvl<np.max(wvl_divisor))]
-        interpolated_spd = np.interp(commonWvl, wvl_divisor, spectrum_divisor)
-        interpolated_original = np.interp(commonWvl, self.wvl, self.spectrum)
+        divisor_indices = wvl_divisor.argsort()     # arrange so that wvl_divisor is in ascending order for the interpolation
+        interpolated_spd = np.interp(commonWvl, wvl_divisor[divisor_indices], spectrum_divisor[divisor_indices])
+        dividend_indices = self.wvl.argsort()  # arrange so that self.wvl is in ascending order for the interpolation
+        interpolated_original = np.interp(commonWvl, self.wvl[dividend_indices], self.spectrum[dividend_indices])
         self.wvl = commonWvl
         self.spectrum = interpolated_original / interpolated_spd
 
@@ -342,8 +359,10 @@ class SpectrumHandler:
             raise TypeError("Input of add must be a SpectrumHandler object.")
         wvl_add, spectrum_add = spectrumObject.get_spectrum()
         commonWvl = self.wvl[(self.wvl>np.min(wvl_add))&(self.wvl<np.max(wvl_add))]
-        interpolated_spd = np.interp(commonWvl, wvl_add, spectrum_add)
-        interpolated_original = np.interp(commonWvl, self.wvl, self.spectrum)
+        addend_indices = wvl_add.argsort()  # arrange so that wvl_add is in ascending order for the interpolation
+        interpolated_spd = np.interp(commonWvl, wvl_add[addend_indices], spectrum_add[addend_indices])
+        orig_indices = self.wvl.argsort()  # arrange so that self.wvl is in ascending order for the interpolation
+        interpolated_original = np.interp(commonWvl, self.wvl[orig_indices], self.spectrum[orig_indices])
         self.wvl = commonWvl
         self.spectrum = interpolated_original + interpolated_spd
 
@@ -357,8 +376,10 @@ class SpectrumHandler:
             raise TypeError("Input of multiply must be a SpectrumHandler object.")
         wvl_mult, spectrum_mult = spectrumObject.get_spectrum()
         commonWvl = self.wvl[(self.wvl>np.min(wvl_mult))&(self.wvl<np.max(wvl_mult))]
-        interpolated_spd = np.interp(commonWvl, wvl_mult, spectrum_mult)
-        interpolated_original = np.interp(commonWvl, self.wvl, self.spectrum)
+        multipl_indices = wvl_mult.argsort()  # arrange so that wvl_mult is in ascending order for the interpolation
+        interpolated_spd = np.interp(commonWvl, wvl_mult[multipl_indices], spectrum_mult[multipl_indices])
+        original_indices = self.wvl.argsort()  # arrange so that self.wvl is in ascending order for the interpolation
+        interpolated_original = np.interp(commonWvl, self.wvl[original_indices], self.spectrum[original_indices])
         self.wvl = commonWvl
         self.spectrum = interpolated_original * interpolated_spd
 

@@ -96,9 +96,24 @@ class FrogResult:
         return fwhm(self.envelope, self.time[1] - self.time[2])
 
 
-    def get_spectral_phase(self):
+    def get_spectral_phase(self, expect_random_phase=False):
         """returns wavelength in nm, reconstructed spectral phase in rad"""
-        return self.wvl, self.sphase
+        if expect_random_phase:
+            wspectrum = self.spectrum * 1/self.wvl**2
+            threshold = 0.8*np.max(wspectrum)
+            imin, imax = np.where(wspectrum > threshold)[0][[0,-1]]
+            if imax == imin:
+                imax = imin + 1
+                if imax == len(self.sphase):
+                    imax -= 1
+                    imin = imax - 1
+            imaxslope = np.argmax(np.abs(np.diff(self.sphase[imin:imax+1]))) + imin
+            slope = np.diff(self.sphase)[imaxslope] / np.diff(1/self.wvl)[imaxslope]
+            phase = self.sphase - slope / self.wvl
+            phase = np.unwrap(phase)
+        else:
+            phase = self.sphase
+        return self.wvl, phase
 
     def get_spectrum(self):
         """returns wavelength in nm, reconstructed intensity spectrum (a.u.)"""

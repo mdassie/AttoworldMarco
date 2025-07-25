@@ -204,7 +204,6 @@ def calibrate(data, column: int, calibration_file_path="./calibration_data/Reso_
         spectrum: calibrated spectrum
     """
     wavelength_calibration, lamp_spec, lamp_measbyReso, calibration_smoothed = load_calibration_data(calibration_file_path)
-
     if wavelength_calibration_slope is None or wavelength_calibration_intercept is None:
         cal_slope = 1.
         cal_intercept = 0.
@@ -248,14 +247,9 @@ def calibrate(data, column: int, calibration_file_path="./calibration_data/Reso_
             center = centers_of_overlap[i]/2+centers_of_overlap[i+1]/2
             FWHM = centers_of_overlap[i+1] - centers_of_overlap[i]
             spectrum += np.interp(wavelength, spectra[i][0], spectra[i][1]*tukey_window(spectra[i][0], center, FWHM, w))
-            plt.plot(spectra[i][0], spectra[i][1]*tukey_window(spectra[i][0], center, FWHM, w))
         calibr_interpolated = np.interp(wavelength, wavelength_calibration, calibration_smoothed)
         if not null_calibration:
             spectrum *= calibr_interpolated
-
-        plt.plot(data[:, 7*column +1]*cal_slope+cal_intercept, data[:, 7*column +2])
-        plt.plot(wavelength, spectrum)
-
         if w < 0:
             raise ValueError('in function calibrate(), the spectra to be stitched do not overlap')
 
@@ -275,7 +269,7 @@ def calibrate(data, column: int, calibration_file_path="./calibration_data/Reso_
             if len(data[:, 7*column +2][~np.isnan(data[:, 7*column +2])]) != len(dark[:, 7*dark_c +2][~np.isnan(dark[:, 7*dark_c +2])]):
                 raise ValueError('In function calibrate(), the dark spectrum is not the same length as the spectrum to be calibrated.\n'
                                  'Please check the column indices of the dark spectrum and the main spectrum')
-            if data[:, 7*column +1][~np.isnan(data[:, 7*column +1])][0] != dark[:, 7*dark_c +2][~np.isnan(dark[:, 7*dark_c +1])][0]:
+            if data[:, 7*column +1][~np.isnan(data[:, 7*column +1])][0] != dark[:, 7*dark_c +1][~np.isnan(dark[:, 7*dark_c +1])][0]:
                 print('WARNING: In function calibrate(), the dark spectrum does not have the same wavelength as the spectrum to be calibrated.\n'
                                  'Please check the column indices of the dark spectrum and the main spectrum')
 

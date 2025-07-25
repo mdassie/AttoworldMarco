@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import scipy.signal
 import h5py
@@ -110,7 +112,7 @@ class LunaResult:
     def average_modes(self):
         """Averages the propagation modes in the Luna result file"""
         if len(self.fieldFT.shape) == 3:
-            self.fieldFT = np.mean(self.fieldFT, axis=1)
+            self.fieldFT = np.sum(self.fieldFT, axis=1)
             self.stats_zdw = None
             self.stats_peakpower = None
             self.stats_energy = np.sum(self.stats_energy, axis=1)
@@ -190,8 +192,51 @@ class LunaResult:
         phase = np.angle(self.fieldFT[index, ::-1])
         return wvl, phase
 
+    def plot_propagation(self, mode: int = None, normalize_spectra: bool = False, wavelength_representation: bool = True, logscale: bool = False):
+        """Plots the propagation of the field in the Luna result file.
+
+        Args:
+            mode (int): mode to plot. If None, the average of all modes is plotted.
+        """
+        if mode is not None:
+            self.select_mode(mode)
+        else:
+            self.average_modes()
+        if self.fieldFT is None or self.omega is None or self.z is None:
+            print("ERROR: No field data loaded")
+            return
+        fig, ax = plt.subplots()
+        if wavelength_representation:
+            wvl = 2 * np.pi * c / self.omega[self.omega != 0]
+            if normalize_spectra:
+                spectral_data = copy.deepcopy(np.abs(self.fieldFT[:, self.omega != 0])**2 * (2 * np.pi * c / wvl**2))
+                for spectrum in spectral_data:
+                    spectrum /= np.max(spectrum)
+            else:
+                spectral_data = np.abs(self.fieldFT[:,self.omega != 0])**2 * (2 * np.pi * c / wvl**2)
+            if logscale:
+                spectral_data = np.log(spectral_data + np.max(spectral_data) * 1e-10)
+            ax.pcolormesh(wvl/1e-9, self.z, spectral_data, shading='nearest')
+            ax.set_xlabel("wavelength (nm)")
+            ax.set_ylabel("position along the fiber (m)")
+            ax.set_xlim([40, 1200])
+        else:
+            if normalize_spectra:
+                spectral_data = copy.deepcopy(np.abs(self.fieldFT)**2)
+                for spectrum in spectral_data:
+                    spectrum /= np.max(spectrum)
+            else:
+                spectral_data = np.abs(self.fieldFT)**2
+            if logscale:
+                spectral_data = np.log(spectral_data + np.max(spectral_data) * 1e-10)
+            ax.pcolormesh(self.omega/2/np.pi/1e15, self.z, spectral_data, shading='nearest')
+            ax.set_xlabel("frequency (PHz)")
+            ax.set_ylabel("position along the fiber (m)")
+            ax.set_xlim([0.02, 3.0])
+        return fig
+
     def plot_stats(self):
-        """Plots the 'stats_' attribute of the simulation stored in the present object."""
+        """Plots the 'stats_' attributes of the simulation stored in the present object."""
 
         fig, axs = plt.subplots(2, 2, figsize=[7, 5])
         axs[0,0].plot(self.stats_z, self.stats_pressure)
