@@ -103,6 +103,21 @@ def asymmetric_tukey_window(x, edge1: float, edge2: float, edge1_width: float, e
         raise TypeError('in function tukey window x is neither np array nor list nor float')
     return y
 
+def fft_tukey_longpass(signalTimeV, signalV, lowWavelengthEdge, lowEdgeWidth):
+
+    upFreqEdge = constants.speed_of_light / lowWavelengthEdge * 1e-6
+
+    upFreqEdgeWidth = constants.speed_of_light / (lowWavelengthEdge - lowEdgeWidth/2) * 1e-6 - constants.speed_of_light / (lowWavelengthEdge + lowEdgeWidth/2) * 1e-6
+
+    ftAxis, ftSig = fourier_transform(signalTimeV, signalV)
+
+    window = asymmetric_tukey_window(np.abs(ftAxis), -10, upFreqEdge, 5, upFreqEdgeWidth)
+    signalFilteredFT = ftSig * window
+
+    fieldTimeV, fieldV = inverse_fourier_transform(ftAxis, signalFilteredFT)
+
+    return fieldTimeV, fieldV
+
 class TraceHandler:
     """Loads and stores the trace (field vs time) saved to file (two columns, tab separated) or given in the form of time and field [or wavelengths, spectrum and phase] arrays.
 
@@ -250,7 +265,7 @@ class TraceHandler:
         if np.any(spectrum_FFT_trace<0):
             print('\n\nWARNING: in function TraceHandler.load_from_spectral_data() spectrum_FFT_trace contains negative values; set them to zero in the constructor\n\n')
             spectrum_FFT_trace = np.maximum(spectrum_FFT_trace, 0)
-            
+
         # check that the wvl_FFT_trace array is monotonically increasing
         if np.any(np.diff(wvl_FFT_trace) < 0):
             if np.all(np.diff(wvl_FFT_trace) < 0):
@@ -658,7 +673,7 @@ class TraceHandler:
         dt = t[1] - t[0]
         return fwhm(en**2, dt)
 
-    def fft_tukey_bandpass(self, lowWavelengthEdge, upWavelengthEdge, lowEdgeWidth, highEdgeWidth):
+    def fft_tukey_bandpass(self, lowWavelengthEdge, upWavelengthEdge, lowEdgeWidth, highEdgeWidth, filter_stdev: bool = True):
         """Applies a bandpass filter to the trace in the frequency domain using a tukey window.
 
         The tukey window is 1 between  lowWavelengthEdge+lowEdgeWidth/2  and  upWavelengthEdge-highEdgeWidth/2
@@ -682,6 +697,34 @@ class TraceHandler:
                     upWavelengthEdge + highEdgeWidth / 2) * 1e-6
 
         window = asymmetric_tukey_window(np.abs(self.frequencyAxis), lowFreqEdge, upFreqEdge, lowFreqEdgeWidth,
+                                         upFreqEdgeWidth)
+
+        self.fftFieldV = self.fftFieldV * window
+        if filter_stdev and self.fieldStdevV is not None:
+            timeDump, self.fieldStdevV = fft_tukey_longpass(self.fieldTimeV, self.fieldStdevV, lowWavelengthEdge, lowEdgeWidth)
+        self.update_trace_from_fft()
+        self.update_fft_spectrum()
+        self.strip_from_trace()
+
+    def fft_tukey_longpass(self, lowWavelengthEdge, lowEdgeWidth):
+        """Applies a longpass filter to the trace in the frequency domain using a tukey window.
+
+        The tukey window is 1 between  lowWavelengthEdge+lowEdgeWidth/2  and  upWavelengthEdge-highEdgeWidth/2
+        and it is reaches zero at lowWavelengthEdge-lowEdgeWidth/2  and  upWavelengthEdge+highEdgeWidth/2.
+        Notice that the edges are only cosine-shaped in the frequency domain. In the wavelength domain upWavelengthEdge - lowWavelengthEdge does not coincide with the FWHM of the tukey function
+
+        Args:
+            lowWavelengthEdge: float (nm)
+            upWavelengthEdge: float (nm)
+            lowEdgeWidth: float (nm)
+            highEdgeWidth: float (nm)
+        """
+        upFreqEdge = constants.speed_of_light / (lowWavelengthEdge - lowEdgeWidth / 2) /2 * 1e-6 + constants.speed_of_light / (
+                    lowWavelengthEdge + lowEdgeWidth / 2) /2 * 1e-6
+        upFreqEdgeWidth = constants.speed_of_light / (lowWavelengthEdge - lowEdgeWidth / 2) * 1e-6 - constants.speed_of_light / (
+                    lowWavelengthEdge + lowEdgeWidth / 2) * 1e-6
+
+        window = asymmetric_tukey_window(np.abs(self.frequencyAxis), -10, upFreqEdge, 5,
                                          upFreqEdgeWidth)
         self.fftFieldV = self.fftFieldV * window
         self.update_trace_from_fft()
@@ -736,7 +779,7 @@ class TraceHandler:
 
         Args:
             wavelengths: ndarray = wavelength array (nm)
-            f: ndarray = transmission function f(λ)
+            f: ndarray = transmission function f(λ) = |E_out(λ)|^2/|E_in(λ)|^2
         """
         if np.any(np.diff(wavelengths) < 0):
             if np.all(np.diff(wavelengths) < 0):
@@ -761,10 +804,43 @@ class TraceHandler:
         #interpolate the spectrum to the frequency axis of the fft
         spectrum_interp = np.interp(self.frequencyAxis, freq, spectrum_freq)
 
-        self.fftFieldV = self.fftFieldV * spectrum_interp
+        self.fftFieldV = self.fftFieldV * np.sqrt(spectrum_interp)
         self.update_trace_from_fft()
         self.update_fft_spectrum()
         self.strip_from_trace()
+
+    def apply_spectrometer_transmission(self, wavelengths, f):
+        """Applies a spectral transmission function to the comparison spectrum (e.g. spectral filter).
+
+        Args:
+            wavelengths: ndarray = wavelength array (nm)
+            f: ndarray = transmission function f(λ)
+        """
+        if np.any(np.diff(wavelengths) < 0):
+            if np.all(np.diff(wavelengths) < 0):
+                wavelengths = wavelengths[::-1]
+                f = f[::-1]
+            else:
+                raise ValueError('in function TraceHandler.apply_transmission() wavelength array is not monotonous')
+        freq = constants.speed_of_light / wavelengths[::-1] * 1e-6
+        spectrum_freq = f[::-1]
+
+        # fill with zeros
+        initial_zero_freq = np.linspace(freq[1]-freq[0], freq[0], int(np.ceil(4 * freq[0]/(freq[1]-freq[0]))))
+        initial_zeros = np.zeros(len(initial_zero_freq))
+        final_zero_freq = np.linspace(2*freq[-1]-freq[-2], 4 * freq[-1], int(np.ceil(15 * freq[-1]/(freq[-1]-freq[-2]))))
+        final_zeros = np.zeros(len(final_zero_freq))
+        freq = np.concatenate((initial_zero_freq, freq, final_zero_freq))
+        spectrum_freq = np.concatenate((initial_zeros, spectrum_freq, final_zeros))
+        # add negative frequencies
+        freq = np.concatenate((-freq[::-1], freq))
+        spectrum_freq = np.concatenate((spectrum_freq[::-1], spectrum_freq))
+
+        #interpolate the spectrum to the frequency axis of the fft
+        freqSpectrometer = constants.speed_of_light / self.wvlSpectrometer * 1e-6
+        spectrum_interp = np.interp(freqSpectrometer, freq, spectrum_freq)
+
+        self.ISpectrometer = self.ISpectrometer * spectrum_interp
 
     def apply_spectrum(self, wvl = None , spectrum = None, CEP_shift: float = 0., stripZeroPadding: bool = True):
         """Applies a spectrum to the phase of the trace. This means that a new trace is computed and stored in the TraceHandler object (replacing the existing one);
@@ -926,6 +1002,9 @@ class TraceHandler:
             low_lim, up_lim (float): xaxis limits for plotting. Default None
             low_lim_freq, up_lim_freq (float): xaxis limits for plotting. Default None
 
+        Returns:
+            TFData: ndarray = the time-frequency data (complex)
+            fig: matplotlib figure object
         """
         dt = np.mean(np.diff(self.fieldTimeV))
         w = scipy.signal.windows.gaussian(int(sigma_time / dt * 6) + 1, sigma_time / dt, sym=True)
@@ -951,9 +1030,9 @@ class TraceHandler:
                          extent=(t_lo+self.fieldTimeV[0], t_hi+self.fieldTimeV[0], f_lo, f_hi), cmap='viridis')
         cbar = fig.colorbar(im1)
 
-        cbar.ax.set_ylabel("Magnitude of the field (Arb. unit)")
+        cbar.ax.set_ylabel("|E| (Arb. unit)")
         fig.tight_layout()
-        return TFData
+        return TFData, fig
 
 
     def plot_trace(self, low_lim = None, up_lim = None, normalize: bool = True):
@@ -979,13 +1058,14 @@ class TraceHandler:
             ax.set_xlim(low_lim, up_lim)
         return fig
 
-    def plot_spectrum(self, low_lim = 40, up_lim = 1000, no_phase: bool = False, phase_blanking_level = 0.05):
+    def plot_spectrum(self, low_lim = 40, up_lim = 1000, no_phase: bool = False, phase_blanking_level = 0.05, comparisonAsFill: bool = False):
         """Plots the trace spectrum and phase together with the spectrometer measurement [if provided].
 
         Args:
             low_lim, up_lim (float): xaxis limits for plotting. Default: 40, 1000
             no_phase: if True, don't plot the phase. Default: False
             phase_blanking_level: float = the minimum intensity level to plot the phase (default 0.05).
+            comparisonAsFill: if True, the spectrometer data is plotted as a filled area with the same color as the trace FFT (default False)
                     """
         fig, ax = plt.subplots()
 
@@ -1002,7 +1082,12 @@ class TraceHandler:
             lines += ax2.plot(self.wvlAxis[(self.wvlAxis>low_lim)&(self.wvlAxis<up_lim)&(self.fftSpectrum>min_intensity)], self.fftphase[(self.wvlAxis>low_lim)&(self.wvlAxis<up_lim)&(self.fftSpectrum>min_intensity)],'--',
                      label='Phase')
         if self.wvlSpectrometer is not None:
-            lines += ax.plot(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)], self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+            if comparisonAsFill:
+                lines.append(ax.fill_between(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+                                self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+                                color=lines[0].get_color(), alpha=0.3, label='Spectrometer'))
+            else:
+                lines += ax.plot(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)], self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
                     label='Spectrometer')
         ax.set_xlabel('Wavelength (nm)')
         ax.set_ylabel('Intensity (Arb. unit)')
@@ -1165,13 +1250,15 @@ class MultiTraceHandler:
         self.traceHandlers[index].fftFieldV = -self.traceHandlers[index].fftFieldV
         self.traceHandlers[index].complexFieldV= -self.traceHandlers[index].complexFieldV
 
-    def set_zero_delay(self, zeroDelay):
+    def set_zero_delay(self, zeroDelay, applyToWaveforms: bool = True):
         """Sets the zero delay for all traces. The zero
         delay is the time value corresponding to the envelope peak of the trace.
         This is used to align the traces in time.
 
         Args:
             zeroDelay: float or list of floats (one per trace)
+            applyToWaveforms: bool = if True (default), the zero delay is applied to the waveforms, shifting them in time.
+                If False, the zero delay is only stored and not applied to the waveforms.
         """
         if isinstance(zeroDelay, (int, float)):
             self.zeroDelay = [zeroDelay]*len(self.traceHandlers)
@@ -1180,6 +1267,24 @@ class MultiTraceHandler:
             self.zeroDelay = zeroDelay
         else:
             raise ValueError('in function MultiTraceHandler.set_zero_delay() zeroDelay should be a float or a list of floats\n')
+        if applyToWaveforms:
+            for i in range(len(self.traceHandlers)):
+                self.traceHandlers[i].fieldTimeV = self.traceHandlers[i].fieldTimeV - self.zeroDelay[i]
+
+    def apply_zero_delay(self, zeroDelay = None):
+        """Applies the zero delay to the waveforms. If zeroDelay is None (default), the stored zero delay is used.
+
+        Args:
+            zeroDelay: float or list of floats (one per trace). If None, the stored zero delay is used.
+        """
+        if zeroDelay is not None:
+            self.set_zero_delay(zeroDelay, applyToWaveforms=True)
+        else:
+            if self.zeroDelay is not None:
+                for i in range(len(self.traceHandlers)):
+                    self.traceHandlers[i].fieldTimeV = self.traceHandlers[i].fieldTimeV - self.zeroDelay[i]
+            else:
+                raise ValueError('in function MultiTraceHandler.apply_zero_delay() zeroDelay is not set\n')
 
     def tukey_bandpass(self, lowWavelengthEdge, upWavelengthEdge, lowEdgeWidth, highEdgeWidth):
         """applies a bandpass filter the traces in the frequency domain using a tukey window. See traceHandler's docs"""
@@ -1268,13 +1373,13 @@ class MultiTraceHandler:
                 self.traceHandlers[i].update_fft()
             wvl, spctr = self.traceHandlers[i].get_spectrum_trace()
             if logscale:
-                ax.plot(wvl, (offset**i)*spctr)
+                ax.plot(wvl[(wvl<up_lim)&(wvl>low_lim)], (offset**i)*spctr[(wvl<up_lim)&(wvl>low_lim)])
                 ylow = np.mean(spctr[(wvl<up_lim)&(wvl>low_lim)])/(offset**3)
                 yup = np.mean(spctr[(wvl<up_lim)&(wvl>low_lim)])*(offset**(len(self.traceHandlers)))
                 ax.set_yscale('log')
                 ax.set_ylim(ylow, yup)
             else:
-                ax.plot(wvl, i*offset + spctr)
+                ax.plot(wvl[(wvl<up_lim)&(wvl>low_lim)], i*offset + spctr[(wvl<up_lim)&(wvl>low_lim)])
         ax.set_xlabel('Wavelength (nm)')
         ax.set_ylabel('Intensity (Arb. unit)')
         if labels is not None:

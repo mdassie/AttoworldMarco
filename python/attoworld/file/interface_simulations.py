@@ -101,13 +101,18 @@ class LunaResult:
             # STATS
             self.stats_z = np.array(data['stats']['z'])
             self.stats_energy = np.array(data['stats']['energy'])
-            self.stats_electrondensity = np.array(data['stats']['electrondensity'])
             self.stats_density = np.array(data['stats']['density'])
             self.stats_pressure = np.array(data['stats']['pressure'])
             self.stats_peakpower = np.array(data['stats']['peakpower'])
             self.stats_peakintensity = np.array(data['stats']['peakintensity'])
             self.stats_zdw = np.array(data['stats']['zdw'])
-            self.stats_peak_ionization_rate = np.array(data['stats']['peak_ionisation_rate'])
+            try:
+                self.stats_electrondensity = np.array(data['stats']['electrondensity'])
+                self.stats_peak_ionization_rate = np.array(data['stats']['peak_ionisation_rate'])
+            except KeyError:
+                print("WARNING: No electron density or peak ionization rate data found in the Luna result file. Set to None.")
+                self.stats_electrondensity = None
+                self.stats_peak_ionization_rate = None
 
     def average_modes(self):
         """Averages the propagation modes in the Luna result file"""
