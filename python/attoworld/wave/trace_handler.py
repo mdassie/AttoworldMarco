@@ -7,6 +7,7 @@ import scipy.special
 import scipy.signal
 from scipy import constants
 import pandas
+import pypolar
 from ..numeric import fwhm, find_maximum_location
 
 def check_equal_length(*arg):
@@ -246,7 +247,11 @@ class TraceHandler:
         data = pandas.read_csv(self.filename, sep='\t')
         self.fieldTimeV = data['delay (fs)'].to_numpy()
         self.fieldV = data['field (a.u.)'].to_numpy()
-        self.fieldStdevV = data['stdev field'].to_numpy()
+        try:
+            self.fieldStdevV = data['stdev field'].to_numpy()
+        except:
+            self.fieldStdevV = None
+            print('\n\nWARNING: in function TraceHandler.load_trace() no "field stdev" column found in the trace file\n\n')
         self.normalization_trace = np.max(np.abs(self.fieldV))
         self.update_fft()
 
@@ -425,6 +430,22 @@ class TraceHandler:
                 n_add -= 1
         return True
 
+    def clip_trace(self, timeMin: float, timeMax: float):
+        """clips the trace to the given time interval [timeMin, timeMax].
+
+        Args:
+            timeMin (float): minimum time (fs)
+            timeMax (float): maximum time (fs)
+        """
+        if timeMin >= timeMax:
+            raise ValueError('in function TraceHandler.clip_trace() timeMin must be < timeMax')
+        self.fieldV = self.fieldV[(self.fieldTimeV >= timeMin) & (self.fieldTimeV <= timeMax)]
+        if self.fieldStdevV is not None:
+            self.fieldStdevV = self.fieldStdevV[(self.fieldTimeV >= timeMin) & (self.fieldTimeV <= timeMax)]
+        self.fieldTimeV = self.fieldTimeV[(self.fieldTimeV >= timeMin) & (self.fieldTimeV <= timeMax)]
+        self.normalization_trace = np.max(np.abs(self.fieldV))
+        self.update_fft()
+
     def strip_from_complex_trace(self, timeRange = None):
         """from the complex trace eliminates the zeros appended (zero-padding) when computing the FFT (Analogous to strip_from_trace())."""
         if timeRange is None:
@@ -434,6 +455,22 @@ class TraceHandler:
                                           & (self.complexFieldTimeV <= np.max(self.complexFieldTimeV) - timeRange)]
         self.complexFieldTimeV = self.complexFieldTimeV[(self.complexFieldTimeV >= np.min(self.complexFieldTimeV) + timeRange)
                                           & (self.complexFieldTimeV <= np.max(self.complexFieldTimeV) - timeRange)]
+
+    def scale(self, factor: float):
+        """scales the trace field by a given factor.
+
+        Args:
+            factor (float): scaling factor
+        """
+        self.fieldV = self.fieldV * factor
+        if self.fieldStdevV is not None:
+            self.fieldStdevV = self.fieldStdevV * factor
+        self.fftFieldV = self.fftFieldV * factor
+        self.fftSpectrum = self.fftSpectrum * factor**2
+        if self.complexFieldV is not None:
+            self.complexFieldV = self.complexFieldV * factor
+        if self.normalization_trace is not  None:
+            self.normalization_trace = np.max(np.abs(self.fieldV))
 
     def tukey_time_window(self, lowEdge, upEdge, lowEdgeWidth, upEdgeWidth):
         """applies a tukey window to the trace in the time domain.
@@ -534,6 +571,28 @@ class TraceHandler:
             data = pandas.DataFrame({'delay (fs)': fieldTimeV_to_write, 'field (a.u.)': fieldV_to_write})
         data.to_csv(filename, sep='\t', index=False)
 
+    def save_spectrum_to_file(self, filename, low_lim=None, up_lim=None, phase: bool = True):
+        """Saves the spectrum to file (more precisely the fourier transform of the trace, in the wavelength domain)
+
+        Args:
+            filename
+            low_lim, up_lim: only save the spectrum between low_lim and up_lim (default: None, None)
+            phase (bool): if True (default) the spectral phase will be saved to the file as well.
+        """
+        if low_lim is not None and up_lim is not None:
+            wvl_to_write = self.wvlAxis[(self.wvlAxis >= low_lim) & (self.wvlAxis <= up_lim)]
+            ISpectrometer_to_write = self.fftSpectrum[(self.wvlAxis >= low_lim) & (self.wvlAxis <= up_lim)]
+            Phase_to_write = self.fftphase[(self.wvlAxis >= low_lim) & (self.wvlAxis <= up_lim)]
+        else:
+            wvl_to_write = self.wvlAxis
+            ISpectrometer_to_write = self.fftSpectrum
+            Phase_to_write = self.fftphase
+        if phase:
+            data = pandas.DataFrame({'wavelength (nm)': wvl_to_write, 'intensity (a.u.)': ISpectrometer_to_write, 'phase (rad)': Phase_to_write})
+        else:
+            data = pandas.DataFrame({'wavelength (nm)': wvl_to_write, 'intensity (a.u.)': ISpectrometer_to_write})
+        data.to_csv(filename, sep='\t', index=False)
+
     def normalize_spectrum(self):
         """Normalizes the comparison spectrum to its integral."""
         spectrum_range = [60, 930]
@@ -562,6 +621,10 @@ class TraceHandler:
     def get_spectrum_trace(self):
         """Returns the wavelength and spectral intensity corresponding to the fourier transform of the trace."""
         return self.wvlAxis, self.fftSpectrum
+
+    def get_spectrum_spectrometer(self):
+        """Returns the wavelength and spectral intensity corresponding to the spectrometer data."""
+        return self.wvlSpectrometer, self.ISpectrometer
 
     def get_spectral_phase(self):
         """Returns the wavelength array and the spectral phase array corresponding to the FFT of the trace."""
@@ -658,10 +721,10 @@ class TraceHandler:
         t, en = self.get_envelope()
         dt = t[1]-t[0]
         max_index, max_value = find_maximum_location(en)
-        self.zero_delay = t[0] + dt * max_index
+        self.zero_delay = t[int(max_index)]
         return self.zero_delay
 
-    def get_FWHM(self):
+    def get_FWHM(self,  of_the_abs_field: bool = False):
         """get the FWHM of the trace.
 
         Attention: the time array of the trace envelope should be fine enough to start with in order to resolve well the FWHM (please check it)
@@ -670,6 +733,8 @@ class TraceHandler:
             FWHM: float
         """
         t, en = self.get_envelope()
+        if of_the_abs_field:
+            en = np.sqrt(np.abs(self.fieldV))
         dt = t[1] - t[0]
         return fwhm(en**2, dt)
 
@@ -741,27 +806,23 @@ class TraceHandler:
             abs_rf (ndarray): modulus of the response function (|Signal(ν)/E(ν)|)
             phase_rf (ndarray): phase of the response function (arg(Signal(ν)/E(ν)))
         """
-        if np.any(np.diff(freq)) < 0:
-            if np.all(np.diff(freq)) < 0:
-                freq = freq[::-1]
-                abs_rf = abs_rf[::-1]
-                phase_rf = phase_rf[::-1]
-            else:
-                raise ValueError('in function TraceHandler.apply_transmission() wavelength array is not monotonous')
-
-        # extend response function using the last point (NOT FOR REAL USE, PLEASE APPLY BANDPASS AFTERWARDS)
-        # and add negative frequencies
-        final_val_freq = np.array([np.max(self.frequencyAxis)*2])
-        final_val = np.array([abs_rf[-1]])
-        m, b = np.polyfit(freq, phase_rf, 1)
-        final_phase = m*final_val_freq + b
-        freq = np.concatenate((-final_val_freq[::-1], -freq[::-1], freq, final_val_freq))
-        abs_rf = np.concatenate((final_val[::-1], abs_rf[::-1], abs_rf, final_val))
-        phase_rf = np.concatenate((final_phase[::-1], phase_rf[::-1], phase_rf, final_phase))
+        if np.min(freq) * np.max(freq) >= 0:
+            # extend response function using the last point (NOT FOR REAL USE, PLEASE APPLY BANDPASS AFTERWARDS)
+            # and add negative frequencies
+            final_val_freq = np.array([np.max(self.frequencyAxis)*2])
+            final_val = np.array([abs_rf[-1]])
+            m, b = np.polyfit(freq, phase_rf, 1)
+            final_phase = m*final_val_freq + b
+            freq = np.concatenate((-final_val_freq[::-1], -freq[::-1], freq, final_val_freq))
+            abs_rf = np.concatenate((final_val[::-1], abs_rf[::-1], abs_rf, final_val))
+            phase_rf = np.concatenate((-final_phase[::-1], -phase_rf[::-1], phase_rf, final_phase))
+        elif (np.abs(np.min(freq))-np.abs(np.max(freq)))/np.abs(np.max(freq)) > 0.1:
+            raise ValueError('in function TraceHandler.deconvolute_by_response_function() frequency does include negative frequencies, but does not look symmetric around zero')
 
         # interpolate the spectrum to the frequency axis of the fft
-        abs_interp = np.interp(self.frequencyAxis, freq, abs_rf)
-        phase_interp = np.interp(self.frequencyAxis, freq, phase_rf)
+        sorted_indices = np.argsort(freq)
+        abs_interp = np.interp(self.frequencyAxis, freq[sorted_indices], abs_rf[sorted_indices])
+        phase_interp = np.interp(self.frequencyAxis, freq[sorted_indices], phase_rf[sorted_indices])
 
         # BUG: Somehow the spectrum changes after fluence correction
         #fl_orig = self.get_fluence()
@@ -894,6 +955,9 @@ class TraceHandler:
         """calculates the fresnel reflection of the pulse at the interface between two materials. The waveform is travelling from material 1 to material 2.
         The first medium (material1) should be non-absorptive. As usual the resulting waveform is stored in the TraceHandler object, replacing the previous one.
 
+        Important: the zero delay is not consistent throughout the calculation. i.e., spectral phase of the reflected pulse is correctly calculated, except for a linear term (delay shift).
+        If the absolute delay shift at the reflection is important, please use fresnel_reflection_pypolar()
+
         Refractive index files should contain 3 space-separated columns, respectively with headers: wvl n k, where wvl is the wavelength in um, n and k resp. the real and imaginary part of the refractive index.
         Args:
             material2: the filename (without '.txt') of the refractive index data for the material after the interface (e.g. Si Al MgF2); wavelength is in um in the refractive index file
@@ -903,6 +967,10 @@ class TraceHandler:
                 if False backward reflection is computed (the previous waveform is the reflection of the result waveform)
             s_polarized (bool): True. Reflection calculation only implemented for s-polarized light
             path (str): path for the refractive index files. Defaults to "./RefractiveIndices/"
+
+        Returns:
+            wavelength array (nm)
+            reflection amplitude array (complex)
             """
         if not s_polarized:
             raise ValueError('in function TraceHandler.fresnel_reflection() p_polarized is not implemented yet\n')
@@ -975,9 +1043,19 @@ class TraceHandler:
         r = ((n1Interp * np.cos(angle_in*np.pi/180) - n2Interp * np.sqrt(1-(n1Interp/n2Interp*np.sin(angle_in*np.pi/180))**2)) /
              (n1Interp * np.cos(angle_in*np.pi/180) + n2Interp * np.sqrt(1-(n1Interp/n2Interp*np.sin(angle_in*np.pi/180))**2)))
         if forward:
-            self.fftFieldV = self.fftFieldV * r
+            self.fftFieldV = self.fftFieldV * np.conj(r)  # the reflection coefficient has been complex-conjugated to adjust to the definition of the fft in numpy
         else:
-            self.fftFieldV = self.fftFieldV / r
+            self.fftFieldV = self.fftFieldV / np.conj(r)
+
+        indcs = np.argwhere(self.frequencyAxis < 0)
+        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, np.abs(r[indcs])**2, label='Reflectivity', color = "red")
+        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, -np.angle(r[indcs])/10, label='Phase shift (rad)', color='red', linestyle='--')
+        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, np.real(n2Interp[indcs])/10, label='Re refractive index of material 2', color = "blue")
+        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, -np.imag(n2Interp[indcs])/10, label='Im refractive index of material 2', color = "green")
+        plt.legend()
+        plt.xlabel('Wavelength (nm)')
+        plt.xlim(50, 1000)
+        plt.show()
 
         self.fieldStdevV = None
 
@@ -985,6 +1063,92 @@ class TraceHandler:
         self.strip_from_trace()
         self.update_fft_spectrum()
 
+        indcs = np.argwhere(self.frequencyAxis > 0)
+        return constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, r[indcs]
+
+    def fresnel_reflection_pypolar(self, material2, angle_in, material1=None, forward: bool=True, s_polarized: bool=True, path: str = "./RefractiveIndices/", plot_reflectivity: bool = False):
+        """calculates the fresnel reflection of the pulse at the interface between two materials. The waveform is travelling from material 1 to material 2.
+        The first medium (material1) should be non-absorptive. As usual the resulting waveform is stored in the TraceHandler object, replacing the previous one.
+
+        Alternative method equivalent to fresnel_reflection() using the pypolar module. In addition this method takes care of correct absolute delay of the reflected pulse. This is useful in particular when the incident and reflected field at the interface must be superimposed.
+        Spectral deviation from fresnel_reflection() should be attributed to different treatment of the zero_padding during the calculation.
+
+        Refractive index files should contain 3 space-separated columns, respectively with headers: wvl n k, where wvl is the wavelength in um, n and k resp. the real and imaginary part of the refractive index.
+        Args:
+            material2: the filename (without '.txt') of the refractive index data for the material after the interface (e.g. Si Al MgF2); wavelength is in um in the refractive index file
+            angle_in: the incidence angle in degrees
+            material1: the filename (without '.txt') of the refractive index data for the material before the interface. If None (default), vacuum is assumed
+            forward (bool):  if True (default) forward reflection is computed (the result waveform is the reflection of the previously stored waveform.
+                if False backward reflection is computed (the previous waveform is the reflection of the result waveform)
+            s_polarized (bool): True. Reflection calculation only implemented for s-polarized light
+            path (str): path for the refractive index files. Defaults to "./RefractiveIndices/"
+
+        Returns:
+            wavelength array (nm)
+            reflection amplitude array (complex)
+            """
+        try:
+            import pypolar
+        except ImportError:
+            raise ImportError("pypolar module is required for fresnel_reflection_pypolar(). Please install it via 'pip install pypolar'")
+
+        if not s_polarized:
+            raise ValueError('in function TraceHandler.fresnel_reflection() p_polarized is not implemented yet\n')
+
+        # read refractive index
+        refIndexData = pandas.read_table(path + material2 + ".txt", sep=" ", keep_default_na=False)
+        wvl2 = np.array(refIndexData['wvl']) * 1e3
+        n2 = np.array(refIndexData['n']) -1j* np.array(refIndexData['k'])
+        if material1 is None:
+            wvl1 = np.array(wvl2)
+            n1 = n2*0 + 1
+        else:
+            refIndexData = pandas.read_table(path + material1 + ".txt", sep=" ", keep_default_na=False)
+            wvl1 = np.array(refIndexData['wvl']) * 1e3
+            n1 = np.array(refIndexData['n']) -1j* np.array(refIndexData['k'])
+
+        zpTime, zpfield = zero_padding(self.fieldTimeV, self.fieldV)
+
+        freq_field =np.fft.rfftfreq(len(zpTime), d=(zpTime[1]-zpTime[0]))  # PHz
+        fft_field = np.fft.rfft(zpfield)
+        wvl_field = constants.speed_of_light / freq_field * 1e-6  # nm
+
+        sorted_indices1 = np.argsort(wvl1)
+        sorted_indices2 = np.argsort(wvl2)
+        n1_interp = np.interp(wvl_field, wvl1[sorted_indices1], n1[sorted_indices1])
+        n2_interp = np.interp(wvl_field, wvl2[sorted_indices2], n2[sorted_indices2])
+        r = []
+        for i in range(len(wvl_field)):
+            r_i = pypolar.fresnel.r_per_amplitude(n2_interp[i], angle_in, n_i=n1_interp[i], deg=True) # s-polarized!!!
+            r.append(r_i)
+        r = np.array(r)
+
+        if plot_reflectivity:
+            plt.plot(wvl_field, np.abs(r)**2, label='Reflectivity', color = "red")
+            plt.plot(wvl_field, np.angle(r)/10, label='Phase shift (rad, x0.1)', color='red', linestyle='--')
+            plt.plot(wvl_field, n2_interp/10, label='Refractive index of material 2 (x0.1)', color = "blue")
+            plt.plot(wvl_field, np.imag(n2_interp)/10, label='Im refractive index of material 2 (x0.1)', color = "green")
+            plt.legend()
+            plt.xlabel('Wavelength (nm)')
+            plt.xlim(50, 1000)
+            plt.show()
+
+        if forward:
+            fft_field = fft_field * r
+        else:
+            fft_field = fft_field / r
+
+        zpfield = np.fft.irfft(fft_field, n=len(zpTime))
+        n_clip = int((len(zpTime) - len(self.fieldTimeV)) / 2)
+        self.fieldV = zpfield[n_clip:-n_clip]
+        if len(self.fieldV) != len(self.fieldTimeV):
+            raise ValueError('in function TraceHandler.fresnel_reflection_pypolar() something went wrong with the zero padding removal')
+        self.fieldStdevV = None
+
+        self.update_fft()
+        self.update_fft_spectrum()
+
+        return wvl_field, r
 
     def apply_zero_phase(self):
         """Applies zero-phase to the trace; this allows, for example, to retrieve the fourier limited pulse corresponding to the same FFT spectrum of the loaded trace"""
@@ -994,29 +1158,36 @@ class TraceHandler:
         self.strip_from_trace()
         self.update_fft_spectrum()
 
-    def time_frequency_analysis(self, sigma_time, low_lim=None, up_lim=None, low_lim_freq=None, up_lim_freq=None):
+    def time_frequency_analysis(self, sigma_time, low_lim=None, up_lim=None, low_lim_freq=None, up_lim_freq=None, logarithmicScale: bool = False, range_logscale = [-4, 0], step_tfa: int = 1):
         """Performs time-frequency analysis by using scipy's short time fourier transform (fourier transform of the trace convoluted by a 'sigma_time' broad gaussian).
 
         Args:
             sigma_time: sigma of the gaussian window
             low_lim, up_lim (float): xaxis limits for plotting. Default None
             low_lim_freq, up_lim_freq (float): xaxis limits for plotting. Default None
+            logarithmicScale: bool = if True, the color scale is logarithmic (default False)
+            step_tfa: int = step for the time frequency analysis (default 1). in units of the given time step of the trace.
 
         Returns:
             TFData: ndarray = the time-frequency data (complex)
             fig: matplotlib figure object
         """
+        if low_lim is None or up_lim is None:
+            indices_select = np.arange(0, self.fieldV.size)
+        else:
+            indices_select = np.argwhere((self.fieldTimeV > (low_lim - 2 * sigma_time)) & (self.fieldTimeV < (up_lim + 2 * sigma_time)))
+        indices_select = indices_select.flatten()
         dt = np.mean(np.diff(self.fieldTimeV))
         w = scipy.signal.windows.gaussian(int(sigma_time / dt * 6) + 1, sigma_time / dt, sym=True)
-        TFA = scipy.signal.ShortTimeFFT(w, hop=1, fs=1. / dt, mfft=int(sigma_time / dt * 24), scale_to='magnitude')
-        TFData = TFA.stft(self.fieldV)
+        TFA = scipy.signal.ShortTimeFFT(w, hop=step_tfa, fs=1. / dt, mfft=int(sigma_time / dt * 24), scale_to='magnitude')
+        TFData = TFA.stft(self.fieldV[indices_select])
 
         fig, ax = plt.subplots()
-        t_lo, t_hi, f_lo, f_hi = TFA.extent(self.fieldV.size)  # time and freq range of plot
+        t_lo, t_hi, f_lo, f_hi = TFA.extent(self.fieldV[indices_select].size)  # time and freq range of plot
         if low_lim is None:
-            low_lim = t_lo+self.fieldTimeV[0]
+            low_lim = t_lo+self.fieldTimeV[indices_select][0]
         if up_lim is None:
-            up_lim = t_hi+self.fieldTimeV[0]
+            up_lim = t_hi+self.fieldTimeV[indices_select][0]
         if low_lim_freq is None:
             low_lim_freq = 0
         if up_lim_freq is None:
@@ -1026,11 +1197,21 @@ class TraceHandler:
                 ylim=(low_lim_freq, up_lim_freq))
         ax.set_xlabel('Time (fs)')
         ax.set_ylabel('Frequency (PHz)')
-        im1 = ax.imshow(abs(TFData)/np.max(abs(TFData)), origin='lower', aspect='auto',
-                         extent=(t_lo+self.fieldTimeV[0], t_hi+self.fieldTimeV[0], f_lo, f_hi), cmap='viridis')
+        if logarithmicScale:
+            plotted_TFData = np.log10(abs(TFData**2)/np.max(abs(TFData**2)))
+            plotted_TFData = np.minimum(plotted_TFData, range_logscale[1])  # limit the values to 0
+            plotted_TFData = np.maximum(plotted_TFData, range_logscale[0])  # limit the values to -4
+            im1 = ax.imshow(plotted_TFData, origin='lower', aspect='auto',
+                         extent=(t_lo+self.fieldTimeV[indices_select][0], t_hi+self.fieldTimeV[indices_select][0], f_lo, f_hi), cmap='viridis')
+        else:
+            im1 = ax.imshow(abs(TFData)/np.max(abs(TFData)), origin='lower', aspect='auto',
+                         extent=(t_lo+self.fieldTimeV[indices_select][0], t_hi+self.fieldTimeV[indices_select][0], f_lo, f_hi), cmap='viridis')
         cbar = fig.colorbar(im1)
 
-        cbar.ax.set_ylabel("|E| (Arb. unit)")
+        if logarithmicScale:
+            cbar.ax.set_ylabel("log(|E|$^2$) (Arb. unit)")
+        else:
+            cbar.ax.set_ylabel("|E| (Arb. unit)")
         fig.tight_layout()
         return TFData, fig
 
@@ -1058,7 +1239,7 @@ class TraceHandler:
             ax.set_xlim(low_lim, up_lim)
         return fig
 
-    def plot_spectrum(self, low_lim = 40, up_lim = 1000, no_phase: bool = False, phase_blanking_level = 0.05, comparisonAsFill: bool = False):
+    def plot_spectrum(self, low_lim = 40, up_lim = 1000, no_phase: bool = False, phase_blanking_level = 0.05, comparisonAsFill: bool = False, frequencyAxis: bool = False):
         """Plots the trace spectrum and phase together with the spectrometer measurement [if provided].
 
         Args:
@@ -1072,25 +1253,55 @@ class TraceHandler:
         if not no_phase:
             ax2 = ax.twinx()
         lines = []
-        min_intensity = phase_blanking_level * np.max(self.fftSpectrum)
-        lines += ax.plot(self.wvlAxis[(self.wvlAxis>low_lim) & (self.wvlAxis<up_lim)], self.fftSpectrum[(self.wvlAxis>low_lim) & (self.wvlAxis<up_lim)],
+        #min_intensity = phase_blanking_level * np.max(self.fftSpectrum)
+        plotted_xaxis = self.wvlAxis[(self.wvlAxis>low_lim) & (self.wvlAxis<up_lim)]
+        plotted_fft = self.fftSpectrum[(self.wvlAxis>low_lim) & (self.wvlAxis<up_lim)]
+        if frequencyAxis:
+            plotted_fft = plotted_fft * plotted_xaxis**2 / constants.speed_of_light
+            plotted_xaxis = constants.speed_of_light / plotted_xaxis * 1e-6
+        min_intensity = phase_blanking_level * np.max(plotted_fft)
+        #lines += ax.plot(self.wvlAxis[(self.wvlAxis>low_lim) & (self.wvlAxis<up_lim)], self.fftSpectrum[(self.wvlAxis>low_lim) & (self.wvlAxis<up_lim)],
+        #        label='Fourier transform')
+        lines += ax.plot(plotted_xaxis, plotted_fft,
                 label='Fourier transform')
         if not no_phase:
             ax2.plot([],[])
             if self.wvlSpectrometer is not None:
                 ax2.plot([],[])
-            lines += ax2.plot(self.wvlAxis[(self.wvlAxis>low_lim)&(self.wvlAxis<up_lim)&(self.fftSpectrum>min_intensity)], self.fftphase[(self.wvlAxis>low_lim)&(self.wvlAxis<up_lim)&(self.fftSpectrum>min_intensity)],'--',
+            plotted_xaxis = plotted_xaxis[(plotted_fft>min_intensity)]
+            plotted_phase = self.fftphase[(self.wvlAxis>low_lim)&(self.wvlAxis<up_lim)]
+            plotted_phase = plotted_phase[(plotted_fft>min_intensity)]
+            lines += ax2.plot(plotted_xaxis, plotted_phase,'--',
                      label='Phase')
+            #lines += ax2.plot(
+            #    self.wvlAxis[(self.wvlAxis > low_lim) & (self.wvlAxis < up_lim) & (self.fftSpectrum > min_intensity)],
+            #    self.fftphase[(self.wvlAxis > low_lim) & (self.wvlAxis < up_lim) & (self.fftSpectrum > min_intensity)],
+            #    '--',
+            #    label='Phase')
         if self.wvlSpectrometer is not None:
+            plotted_specxaxis = self.wvlSpectrometer[(self.wvlSpectrometer > low_lim) & (self.wvlSpectrometer < up_lim)]
+            plotted_specyaxis = self.ISpectrometer[(self.wvlSpectrometer > low_lim) & (self.wvlSpectrometer < up_lim)]
+            if frequencyAxis:
+                plotted_specyaxis = plotted_specyaxis * plotted_specxaxis ** 2 / constants.speed_of_light
+                plotted_specxaxis = constants.speed_of_light / plotted_specxaxis * 1e-6
             if comparisonAsFill:
-                lines.append(ax.fill_between(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
-                                self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
-                                color=lines[0].get_color(), alpha=0.3, label='Spectrometer'))
+                lines.append(ax.fill_between(plotted_specxaxis,
+                                plotted_specyaxis,
+                                color=lines[0].get_color(), alpha=0.2, label='Spectrometer'))
+                #lines.append(ax.fill_between(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+                #                self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+                #                color=lines[0].get_color(), alpha=0.2, label='Spectrometer'))
             else:
-                lines += ax.plot(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)], self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+                lines += ax.plot(plotted_specxaxis, plotted_specyaxis,
                     label='Spectrometer')
+                #lines += ax.plot(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)], self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
+                #    label='Spectrometer')
         ax.set_xlabel('Wavelength (nm)')
         ax.set_ylabel('Intensity (Arb. unit)')
+        if frequencyAxis:
+            ax.set_xlabel('Frequency (PHz)')
+            if not no_phase:
+                ax2.set_xlabel('Frequency (PHz)')
         ax.tick_params(axis='both')
         if not no_phase:
             ax2.set_ylabel('Phase (rad)')
@@ -1238,6 +1449,35 @@ class MultiTraceHandler:
         avge_field /= len(indexList)
         return TraceHandler(time=avge_t, field=avge_field, stdev=None, wvl=None, spectrum=None)
 
+    def common_axis_interpolation(self):
+        """Performs interpolation of all traces to a common time axis (the one with the finest time step).
+
+        The time range is the largest common time range where all traces overlap. The method replaces the traces in the MultiTraceHandler object with the interpolated ones.
+        """
+        mindt = np.inf
+        mint, maxt = -np.inf, +np.inf
+        for i in range(len(self.traceHandlers)):
+            t, field = self.traceHandlers[i].get_trace()
+            if self.zeroDelay is not None:
+                t = t - self.zeroDelay[i]
+            if np.min(t) > mint:
+                mint = np.min(t)
+            if np.max(t) < maxt:
+                maxt = np.max(t)
+            if np.min(np.diff(t)) < mindt:
+                mindt = np.min(np.diff(t))
+        common_t = np.linspace(mint, maxt, int(np.ceil((maxt-mint)/mindt)))
+        for i in range(len(self.traceHandlers)):
+            t, field = self.traceHandlers[i].get_trace()
+            if self.zeroDelay is not None:
+                t = t - self.zeroDelay[i]
+            interp_field = np.interp(common_t, t, field)
+            if self.traceHandlers[i].fieldStdevV is not None:
+                interp_stdev = np.interp(common_t, t, self.traceHandlers[i].fieldStdevV)
+            else:
+                interp_stdev = None
+            self.traceHandlers[i] = TraceHandler(time=common_t, field=interp_field, stdev=interp_stdev, wvl=None, spectrum=None)
+
     def flip_trace(self, index: int):
         """flips the trace number 'index'
 
@@ -1304,7 +1544,7 @@ class MultiTraceHandler:
         for i in range(len(self.traceHandlers)):
             self.traceHandlers[i].apply_spectrum(wvl, spectrum, CEP_shift, stripZeroPadding)
 
-    def plot_traces(self, low_lim=None, up_lim=None, labels=None, delay_shift=None, offset: float=2., errorbar: bool=False, normalize: bool=True, posxtext: list=None, trueLegend: bool=True):
+    def plot_traces(self, low_lim=None, up_lim=None, labels=None, delay_shift=None, offset: float=2., errorbar: bool=False, normalize: bool=True, posxtext: list=None, trueLegend: bool=True, remove_edges_traces: float = None):
         """plots all traces.
 
         Args:
@@ -1315,6 +1555,8 @@ class MultiTraceHandler:
             offset (float): y-axis offset between traces
             errorbar (bool): whether to plot errors. Default False
             normalize (bool): Default True
+            remove_edges_traces (float): if provided, removes the edges of each trace by the specified amount in terms of fraction of the trace length (both sides).
+             because of typical zero padding and temporal smoothing procedure a good value might be 0.15. Default: None
         """
         fig, ax = plt.subplots()
         if delay_shift is None and self.zeroDelay is None:
@@ -1325,18 +1567,22 @@ class MultiTraceHandler:
 
         for i in range(len(self.traceHandlers)):
             if normalize:
-                norm_plot = self.traceHandlers[i].normalization_trace
+                norm_plot = np.max(np.abs(self.traceHandlers[i].get_trace()[1]))
             else:
                 norm_plot = 1
             t, field = self.traceHandlers[i].get_trace()
             stdev_field = self.traceHandlers[i].get_stdev()
+            lim_t_plot = [np.min(t)-1, np.max(t)+1]
+            if remove_edges_traces is not None:
+                lim_t_plot = [np.min(t) + remove_edges_traces*(np.max(t)-np.min(t)), np.max(t) - remove_edges_traces*(np.max(t)-np.min(t))]
             if errorbar and stdev_field is not None:
-                last_fill = ax.fill_between(t-delay_shift[i], offset*i + (field-stdev_field)/norm_plot,
-                                offset*i + (field+stdev_field)/norm_plot,
+                last_fill = ax.fill_between(t[(t<lim_t_plot[1])&(t>lim_t_plot[0])] -delay_shift[i],
+                                            offset*i + (field[(t<lim_t_plot[1])&(t>lim_t_plot[0])]-stdev_field[(t<lim_t_plot[1])&(t>lim_t_plot[0])])/norm_plot,
+                                offset*i + (field[(t<lim_t_plot[1])&(t>lim_t_plot[0])]+stdev_field[(t<lim_t_plot[1])&(t>lim_t_plot[0])])/norm_plot,
                                 label='_nolegend_', alpha=0.3)
-                ax.plot(t-delay_shift[i], offset*i + field/norm_plot, label='Trace '+str(i), color=last_fill.get_facecolor(), alpha=1.0)
+                ax.plot(t[(t<lim_t_plot[1])&(t>lim_t_plot[0])]-delay_shift[i], offset*i + field[(t<lim_t_plot[1])&(t>lim_t_plot[0])]/norm_plot, label='Trace '+str(i), color=last_fill.get_facecolor(), alpha=1.0)
             else:
-                ax.plot(t-delay_shift[i], offset*i + field/norm_plot, label='Trace '+str(i))
+                ax.plot(t[(t<lim_t_plot[1])&(t>lim_t_plot[0])]-delay_shift[i], offset*i + field[(t<lim_t_plot[1])&(t>lim_t_plot[0])]/norm_plot, label='Trace '+str(i))
             if labels is not None and not trueLegend:
                 if posxtext is None:
                     posxtexti = np.min(t-delay_shift[i])
@@ -1355,7 +1601,7 @@ class MultiTraceHandler:
             ax.set_xlim(low_lim, up_lim)
         return fig
 
-    def plot_spectra(self, low_lim=50, up_lim=1000, labels=None, offset=0.015, logscale: bool=False, normalize: bool=True):
+    def plot_spectra(self, low_lim=50, up_lim=1000, labels=None, offset=0.015, logscale: bool=False, normalize: bool=True, frequencyAxis: bool=False):
         """Plot all spectra.
 
         Args:
@@ -1364,6 +1610,7 @@ class MultiTraceHandler:
             labels: label list for the plot legend. Labels should be in the same order as the stored traceHandler objects
             offset: artificial offset between two spectra for display purposes. Default: 0.015
             logscale: (bool); whether to plot in a logscale
+            frequencyAxis: (bool); if True, the x-axis is in frequency (PHz)
         """
         fig, ax = plt.subplots()
         for i in range(len(self.traceHandlers)):
@@ -1372,15 +1619,22 @@ class MultiTraceHandler:
             else:
                 self.traceHandlers[i].update_fft()
             wvl, spctr = self.traceHandlers[i].get_spectrum_trace()
+            spctr = spctr[(wvl<up_lim)&(wvl>low_lim)]
+            wvl = wvl[(wvl<up_lim)&(wvl>low_lim)]
+            if frequencyAxis:
+                spctr = spctr * wvl**2 / constants.speed_of_light
+                wvl = constants.speed_of_light / wvl * 1e-6
             if logscale:
-                ax.plot(wvl[(wvl<up_lim)&(wvl>low_lim)], (offset**i)*spctr[(wvl<up_lim)&(wvl>low_lim)])
-                ylow = np.mean(spctr[(wvl<up_lim)&(wvl>low_lim)])/(offset**3)
-                yup = np.mean(spctr[(wvl<up_lim)&(wvl>low_lim)])*(offset**(len(self.traceHandlers)))
+                ax.plot(wvl, (offset**i)*spctr)
+                ylow = np.mean(spctr)/(offset**3)
+                yup = np.mean(spctr)*(offset**(len(self.traceHandlers)))
                 ax.set_yscale('log')
                 ax.set_ylim(ylow, yup)
             else:
-                ax.plot(wvl[(wvl<up_lim)&(wvl>low_lim)], i*offset + spctr[(wvl<up_lim)&(wvl>low_lim)])
+                ax.plot(wvl, i*offset + spctr)
         ax.set_xlabel('Wavelength (nm)')
+        if frequencyAxis:
+            ax.set_xlabel('Frequency (PHz)')
         ax.set_ylabel('Intensity (Arb. unit)')
         if labels is not None:
             handles, labels_dump = ax.get_legend_handles_labels()

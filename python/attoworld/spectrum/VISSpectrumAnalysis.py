@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
+from scipy import constants
 import pandas
 
 def box_smooth(y, box_pts):
@@ -181,10 +182,19 @@ class SpectrumHandler:
             self.calibration_factor = None
             print("Calibration factor applied to the spectrum. Calibration factor is now set to None.")
 
+    def subtract_offset(self, offset: float = None):
+        """Subtracts an offset from the spectrum.
+
+        If offset is None, the minimum value of the spectrum is subtracted.
+        """
+        if offset is None:
+            offset = np.min(self.spectrum)
+        self.spectrum = np.maximum(self.spectrum - offset, 0)
+
     def save_to_file(self, filename):
         if self.wvl is None or self.spectrum is None:
             raise ValueError("Spectrum not loaded.")
-        data = pandas.DataFrame({'Wavelength': self.wvl, 'Spectrum': self.spectrum})
+        data = pandas.DataFrame({'wavelength (nm)': self.wvl, 'intensity (a.u.)': self.spectrum})
         data.to_csv(filename, index=False, sep='\t')
 
     def save_calibration_factor_to_file(self, filename):
@@ -398,6 +408,96 @@ class SpectrumHandler:
             scalar (float)
         """
         self.spectrum = self.spectrum + scalar
+
+    def fresnel_reflection(self, material2, angle_in, material1=None, forward: bool=True, s_polarized: bool=True, path: str = "./RefractiveIndices/"):
+        """calculates the fresnel reflection of the pulse at the interface between two materials. The light is travelling from material 1 to material 2.
+        The first medium (material1) should be non-absorptive. The effect of the reflection is applied to the spectrum. PHASE IS DISCARDED.
+
+        Refractive index files should contain 3 space-separated columns, respectively with headers: wvl n k, where wvl is the wavelength in um, n and k resp. the real and imaginary part of the refractive index.
+        Args:
+            material2: the filename (without '.txt') of the refractive index data for the material after the interface (e.g. Si Al MgF2); wavelength is in um in the refractive index file
+            angle_in: the incidence angle in degrees
+            material1: the filename (without '.txt') of the refractive index data for the material before the interface. If None (default), vacuum is assumed
+            forward (bool):  if True (default) forward reflection is computed (the result waveform is the reflection of the previously stored waveform.
+                if False backward reflection is computed (the previous waveform is the reflection of the result waveform)
+            s_polarized (bool): True. Reflection calculation only implemented for s-polarized light
+            path (str): path for the refractive index files. Defaults to "./RefractiveIndices/"
+            """
+        if not s_polarized:
+            raise ValueError('in function TraceHandler.fresnel_reflection() p_polarized is not implemented yet\n')
+
+        # read refractive index
+        refIndexData = pandas.read_table(path + material2 + ".txt", sep=" ", keep_default_na=False)
+        wvl2 = np.array(refIndexData['wvl']) * 1e3
+        n2 = np.array(refIndexData['n']) +1j* np.array(refIndexData['k'])
+        if material1 is None:
+            wvl1 = np.array(wvl2)
+            n1 = n2*0 + 1
+        else:
+            refIndexData = pandas.read_table(path + material1 + ".txt", sep=" ", keep_default_na=False)
+            wvl1 = np.array(refIndexData['wvl']) * 1e3
+            n1 = np.array(refIndexData['n']) +1j* np.array(refIndexData['k'])
+
+        # check that the wvl arrays are monotonically increasing
+        if np.any(np.diff(wvl1) < 0):
+            if np.all(np.diff(wvl1) < 0):
+                wvl1 = wvl1[::-1]
+                n1 = n1[::-1]
+            else:
+                raise ValueError('in function TraceHandler.fresnel_reflection() wavelength array is not monotonous')
+        if np.any(np.diff(wvl2) < 0):
+            if np.all(np.diff(wvl2) < 0):
+                wvl2 = wvl2[::-1]
+                n2 = n2[::-1]
+            else:
+                raise ValueError('in function TraceHandler.fresnel_reflection() wavelength array is not monotonous')
+
+        # frequency spectrum (monotonically increasing)
+        freq1 = constants.speed_of_light / wvl1[::-1] * 1e-6
+        freq2 = constants.speed_of_light / wvl2[::-1] * 1e-6
+        n1 = n1[::-1]
+        n2 = n2[::-1]
+
+        # fill with ones
+        initial_ones_freq = np.linspace(freq1[1] - freq1[0], freq1[0], int(np.ceil(4 * freq1[0] / (freq1[1] - freq1[0]))))
+        initial_ones = np.ones(len(initial_ones_freq)) * n1[0]
+        final_ones_freq = np.linspace(2 * freq1[-1] - freq1[-2], 4 * freq1[-1],
+                                      int(np.ceil(15 * freq1[-1] / (freq1[-1] - freq1[-2]))))
+        final_ones = np.ones(len(final_ones_freq)) * n1[-1]
+        freq1 = np.concatenate((initial_ones_freq, freq1, final_ones_freq))
+        n1 = np.concatenate((initial_ones, n1, final_ones))
+        # same for n2
+        initial_ones_freq = np.linspace(freq2[1] - freq2[0], freq2[0], int(np.ceil(4 * freq2[0] / (freq2[1] - freq2[0]))))
+        initial_ones = np.ones(len(initial_ones_freq))* n2[0]
+        final_ones_freq = np.linspace(2 * freq2[-1] - freq2[-2], 4 * freq2[-1],
+                                        int(np.ceil(15 * freq2[-1] / (freq2[-1] - freq2[-2]))))
+        final_ones = np.ones(len(final_ones_freq)) * n2[-1]
+        freq2 = np.concatenate((initial_ones_freq, freq2, final_ones_freq))
+        n2 = np.concatenate((initial_ones, n2, final_ones))
+
+        # add negative frequencies
+        freq1 = np.concatenate((-freq1[::-1], freq1))
+        n1 = np.concatenate((np.conjugate(n1[::-1]), n1))
+        freq2 = np.concatenate((-freq2[::-1], freq2))
+        n2 = np.concatenate((np.conjugate(n2[::-1]), n2))
+
+        # interpolate the n1 and n2 to the frequency axis of the fft
+        n1Interp = np.interp(constants.speed_of_light/self.wvl*1e-6, freq1, n1)
+        n2Interp = np.interp(constants.speed_of_light/self.wvl*1e-6, freq2, n2)
+
+        # calculate the angle of refraction using snell's law (currently not used)
+        angle_out = np.where(np.sin(angle_in*np.pi/180) * np.real(n1Interp) / np.real(n2Interp) <=1,
+            np.arcsin(np.sin(angle_in*np.pi/180) * np.real(n1Interp) / np.real(n2Interp)) * 180/np.pi,
+            np.nan)
+
+        # calculate the fresnel reflection coefficients using only the angle of incidence (NOT SURE THIS WORKS WHEN THE FIRST MEDIUM IS LOSSY)
+        r = ((n1Interp * np.cos(angle_in*np.pi/180) - n2Interp * np.sqrt(1-(n1Interp/n2Interp*np.sin(angle_in*np.pi/180))**2)) /
+             (n1Interp * np.cos(angle_in*np.pi/180) + n2Interp * np.sqrt(1-(n1Interp/n2Interp*np.sin(angle_in*np.pi/180))**2)))
+        if forward:
+            self.spectrum = self.spectrum * np.abs(r)**2
+        else:
+            self.spectrum = self.spectrum / np.abs(r)**2
+
 
     def compute_calibration_factor_spectrometer(self, transmission_additional_optics=None, smoothing='poly', extend_calibration: bool = False, wavelength_ROI: list = [420, 800]):
         """Computes the calibration factor.
