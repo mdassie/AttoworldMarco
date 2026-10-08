@@ -137,7 +137,7 @@ class TraceHandler:
         complexFieldV: (WAVEFORM DATA in the frequency domain) complex field ( = IFFT{FFT(ω)θ(ω)}(t), where θ(ω) = 1 if ω >= 0, θ(ω) = 0 otherwise )
         wvlAxis: (WAVEFORM DATA in the frequency domain) wavelength axis for the FFT spectrum (nm)
         fftSpectrum: (WAVEFORM DATA in the frequency domain) wavelength-dependent positive FFT spectrum ( = |FFT{field}|^2 * df/dλ, λ > 0 )
-        fftphase: (WAVEFORM DATA in the frequency domain) wavelength-dependent spectral phase
+        fftphase: (WAVEFORM DATA in the frequency domain) wavelength-dependent spectral phase STORED ACCORDING TO THE MATH SIGN CONVENTION
 
         wvlSpectrometer: (SPECTROMETER DATA) wavelength (nm)
         ISpectrometer: (SPECTROMETER DATA) spectral intensity
@@ -720,7 +720,8 @@ class TraceHandler:
         # careful: the time grid should be fine enough to resolve the maximum of the envelope
         t, en = self.get_envelope()
         dt = t[1]-t[0]
-        max_index, max_value = find_maximum_location(en)
+        max_index = np.argmax(en)
+        max_value = en[int(max_index)]
         self.zero_delay = t[int(max_index)]
         return self.zero_delay
 
@@ -1035,9 +1036,9 @@ class TraceHandler:
         n2Interp = np.interp(self.frequencyAxis, freq2, n2)
 
         # calculate the angle of refraction using snell's law (currently not used)
-        angle_out = np.where(np.sin(angle_in*np.pi/180) * np.real(n1Interp) / np.real(n2Interp) <=1,
-            np.arcsin(np.sin(angle_in*np.pi/180) * np.real(n1Interp) / np.real(n2Interp)) * 180/np.pi,
-            np.nan)
+        #angle_out = np.where(np.sin(angle_in*np.pi/180) * np.real(n1Interp) / np.real(n2Interp) <=1,
+        #    np.arcsin(np.sin(angle_in*np.pi/180) * np.real(n1Interp) / np.real(n2Interp)) * 180/np.pi,
+        #    np.nan)
 
         # calculate the fresnel reflection coefficients using only the angle of incidence (NOT SURE THIS WORKS WHEN THE FIRST MEDIUM IS LOSSY)
         r = ((n1Interp * np.cos(angle_in*np.pi/180) - n2Interp * np.sqrt(1-(n1Interp/n2Interp*np.sin(angle_in*np.pi/180))**2)) /
@@ -1047,15 +1048,15 @@ class TraceHandler:
         else:
             self.fftFieldV = self.fftFieldV / np.conj(r)
 
-        indcs = np.argwhere(self.frequencyAxis < 0)
-        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, np.abs(r[indcs])**2, label='Reflectivity', color = "red")
-        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, -np.angle(r[indcs])/10, label='Phase shift (rad)', color='red', linestyle='--')
-        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, np.real(n2Interp[indcs])/10, label='Re refractive index of material 2', color = "blue")
-        plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, -np.imag(n2Interp[indcs])/10, label='Im refractive index of material 2', color = "green")
-        plt.legend()
-        plt.xlabel('Wavelength (nm)')
-        plt.xlim(50, 1000)
-        plt.show()
+        #indcs = np.argwhere(self.frequencyAxis < 0)
+        #plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, np.abs(r[indcs])**2, label='Reflectivity', color = "red")
+        #plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, -np.angle(r[indcs])/10, label='Phase shift (rad)', color='red', linestyle='--')
+        #plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, np.real(n2Interp[indcs])/10, label='Re refractive index of material 2', color = "blue")
+        #plt.plot(-constants.speed_of_light / self.frequencyAxis[indcs] * 1e-6, -np.imag(n2Interp[indcs])/10, label='Im refractive index of material 2', color = "green")
+        #plt.legend()
+        #plt.xlabel('Wavelength (nm)')
+        #plt.xlim(50, 1000)
+        #plt.show()
 
         self.fieldStdevV = None
 
@@ -1239,7 +1240,7 @@ class TraceHandler:
             ax.set_xlim(low_lim, up_lim)
         return fig
 
-    def plot_spectrum(self, low_lim = 40, up_lim = 1000, no_phase: bool = False, phase_blanking_level = 0.05, comparisonAsFill: bool = False, frequencyAxis: bool = False):
+    def plot_spectrum(self, low_lim = 40, up_lim = 1000, no_phase: bool = False, phase_blanking_level = 0.05, comparisonAsFill: bool = False, frequencyAxis: bool = False, physics_convention_phase: bool = True, alphaComparison = 0.2):
         """Plots the trace spectrum and phase together with the spectrometer measurement [if provided].
 
         Args:
@@ -1249,6 +1250,9 @@ class TraceHandler:
             comparisonAsFill: if True, the spectrometer data is plotted as a filled area with the same color as the trace FFT (default False)
                     """
         fig, ax = plt.subplots()
+        phase_sign = 1.
+        if physics_convention_phase:
+            phase_sign = -1
 
         if not no_phase:
             ax2 = ax.twinx()
@@ -1270,7 +1274,7 @@ class TraceHandler:
                 ax2.plot([],[])
             plotted_xaxis = plotted_xaxis[(plotted_fft>min_intensity)]
             plotted_phase = self.fftphase[(self.wvlAxis>low_lim)&(self.wvlAxis<up_lim)]
-            plotted_phase = plotted_phase[(plotted_fft>min_intensity)]
+            plotted_phase = phase_sign*plotted_phase[(plotted_fft>min_intensity)]
             lines += ax2.plot(plotted_xaxis, plotted_phase,'--',
                      label='Phase')
             #lines += ax2.plot(
@@ -1287,7 +1291,7 @@ class TraceHandler:
             if comparisonAsFill:
                 lines.append(ax.fill_between(plotted_specxaxis,
                                 plotted_specyaxis,
-                                color=lines[0].get_color(), alpha=0.2, label='Spectrometer'))
+                                color=lines[0].get_color(), alpha=alphaComparison, label='Spectrometer'))
                 #lines.append(ax.fill_between(self.wvlSpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
                 #                self.ISpectrometer[(self.wvlSpectrometer>low_lim)&(self.wvlSpectrometer<up_lim)],
                 #                color=lines[0].get_color(), alpha=0.2, label='Spectrometer'))

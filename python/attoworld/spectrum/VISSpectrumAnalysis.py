@@ -9,6 +9,17 @@ def box_smooth(y, box_pts):
     y_smooth = np.convolve(y, box, mode='same')
     return y_smooth
 
+def integrate_f_with_window(x, y, lmin, lmax, order=10):
+    if lmax <= lmin:
+        raise ValueError("in function integrate_f_with_window() lmax <= lmin")
+    order = round(order/2)*2
+    lmean = lmin/2+lmax/2
+    lhwidth = lmax-lmean
+    xsorted = np.array(x)[np.argsort(np.array(x))]
+    ysorted = np.array(y)[np.argsort(np.array(x))]
+    window = np.exp(-(xsorted-lmean)**order/lhwidth**order)
+    return np.trapezoid(ysorted*window, xsorted)
+
 def eliminate_outliers(y, threshold: float=3, window_points: int=20):
     """Eliminates outliers in the data by replacing them with the mean of the surrounding values.
 
@@ -181,6 +192,11 @@ class SpectrumHandler:
             self.spectrum = self.spectrum * self.calibration_factor
             self.calibration_factor = None
             print("Calibration factor applied to the spectrum. Calibration factor is now set to None.")
+
+    def normalize(self, lmin=100, lmax=950, orderSG=20):
+        """Normalizes the stored spectrum to the area between lmin and lmax (super-gaussian-clipped)"""
+        integral = integrate_f_with_window(self.wvl, self.spectrum, lmin, lmax, orderSG)
+        self.spectrum = self.spectrum/integral
 
     def subtract_offset(self, offset: float = None):
         """Subtracts an offset from the spectrum.

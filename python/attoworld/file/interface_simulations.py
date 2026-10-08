@@ -197,7 +197,7 @@ class LunaResult:
         phase = np.angle(self.fieldFT[index, ::-1])
         return wvl, phase
 
-    def plot_propagation(self, mode: int = None, normalize_spectra: bool = False, wavelength_representation: bool = True, logscale: bool = False):
+    def plot_propagation(self, mode: int = None, normalize_spectra: bool = False, wavelength_representation: bool = True, logscale: bool = False,  rasterize_for_pdf_saving: bool = True):
         """Plots the propagation of the field in the Luna result file.
 
         Args:
@@ -221,7 +221,7 @@ class LunaResult:
                 spectral_data = np.abs(self.fieldFT[:,self.omega != 0])**2 * (2 * np.pi * c / wvl**2)
             if logscale:
                 spectral_data = np.log(spectral_data + np.max(spectral_data) * 1e-10)
-            ax.pcolormesh(wvl/1e-9, self.z, spectral_data, shading='nearest')
+            ax.pcolormesh(wvl/1e-9, self.z, spectral_data, shading='nearest', rasterized = rasterize_for_pdf_saving)
             ax.set_xlabel("wavelength (nm)")
             ax.set_ylabel("position along the fiber (m)")
             ax.set_xlim([40, 1200])
@@ -234,10 +234,52 @@ class LunaResult:
                 spectral_data = np.abs(self.fieldFT)**2
             if logscale:
                 spectral_data = np.log(spectral_data + np.max(spectral_data) * 1e-10)
-            ax.pcolormesh(self.omega/2/np.pi/1e15, self.z, spectral_data, shading='nearest')
-            ax.set_xlabel("frequency (PHz)")
-            ax.set_ylabel("position along the fiber (m)")
+            ax.pcolormesh(self.omega/2/np.pi/1e15, self.z, spectral_data, shading='nearest', rasterized = rasterize_for_pdf_saving)
+            ax.set_xlabel("Frequency (PHz)")
+            ax.set_ylabel("Propag. length (m)")
             ax.set_xlim([0.02, 3.0])
+        return fig
+
+    def plot_propagation_tdomain(self, mode: int = None, normalize_traces: bool = False, logscale: bool = False, maxzpoints: int = 50, rasterize_for_pdf_saving: bool = True):
+        """Plots the propagation of the field in the Luna result file.
+
+        Args:
+            mode (int): mode to plot. If None, the average of all modes is plotted.
+        """
+        if mode is not None:
+            self.select_mode(mode)
+        else:
+            self.average_modes()
+        if self.fieldFT is None or self.omega is None or self.z is None:
+            print("ERROR: No field data loaded")
+            return
+        field_data = []
+        zdata = []
+        segment = int(len(self.z)/maxzpoints)
+        for index in range(len(self.z)):
+            if (maxzpoints < len(self.z)) and (index % segment != 0):
+                continue
+            # check_equal_length(self.fieldFT[index], self.omega)
+            fieldFFT = np.concatenate((self.fieldFT[index, :], np.conjugate(self.fieldFT[index, :][::-1])*0))
+            freq = np.concatenate((self.omega, -self.omega[::-1])) / 2 / np.pi
+            timeV, fieldV = inverse_fourier_transform(freq, fieldFFT) # complex field !!!
+            field_data.append(fieldV)
+            zdata.append(self.z[index])
+        field_data = np.array(field_data) # complex !!
+        zdata = np.array(zdata)
+        fig, ax = plt.subplots()
+        if normalize_traces:
+            field_data = np.abs(field_data)**2
+            for trace in field_data:
+                trace /= np.max(trace)
+        else:
+            field_data = np.abs(field_data)**2
+        if logscale:
+            field_data = np.log(field_data + np.max(field_data) * 1e-10)
+        ax.pcolormesh(timeV*1e15, zdata, field_data, shading='nearest', rasterized=rasterize_for_pdf_saving)
+        ax.set_xlabel("Time (fs)")
+        ax.set_ylabel("Propag. length (m)")
+        ax.set_xlim([-40, 40])
         return fig
 
     def plot_stats(self):
